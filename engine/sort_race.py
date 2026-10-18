@@ -6,7 +6,7 @@ import argparse, math, random, subprocess, wave
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-FPS = 30
+FPS = 60
 SR = 44100
 CJK = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
 MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
@@ -70,6 +70,9 @@ def ease_out_back(x):
     x = min(max(x, 0), 1)
     return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2
 
+def ease_io(x):
+    x = min(max(x, 0), 1); return x * x * (3 - 2 * x)
+
 def ease_out(x):
     x = min(max(x, 0), 1); return 1 - (1 - x) ** 3
 
@@ -83,6 +86,28 @@ class Fonts:
         k = (path, int(size * self.s))
         if k not in self.cache: self.cache[k] = ImageFont.truetype(path, max(8, k[1]))
         return self.cache[k]
+
+_PATCH = {}
+def text_pop(d, xy, txt, font, fill, scale=1.0, stroke=0, alpha=1.0, stroke_fill=BG):
+    """亚像素文字：整字号渲染一次缓存，再用仿射变换做浮点缩放和定位，避免字号取整造成的抖动。"""
+    if scale <= 0.01 or alpha <= 0.004: return
+    key = (txt, font.path, font.size, fill, stroke, stroke_fill)
+    if key not in _PATCH:
+        l, t_, r, b = font.getbbox(txt, stroke_width=stroke)
+        pad = 4
+        im = Image.new("RGBA", (r - l + 2 * pad, b - t_ + 2 * pad), (0, 0, 0, 0))
+        ImageDraw.Draw(im).text((pad - l, pad - t_), txt, font=font, fill=fill, stroke_width=stroke, stroke_fill=stroke_fill)
+        _PATCH[key] = im
+    patch = _PATCH[key]
+    w, h = patch.size; tw, th = w * scale, h * scale
+    cx, cy = xy
+    x0, y0 = math.floor(cx - tw / 2), math.floor(cy - th / 2)
+    ox, oy = (x0 - (cx - tw / 2)) / scale, (y0 - (cy - th / 2)) / scale
+    region = patch.transform((math.ceil(tw) + 2, math.ceil(th) + 2), Image.AFFINE,
+                             (1 / scale, 0, ox, 0, 1 / scale, oy), Image.BICUBIC)
+    if alpha < 1:
+        a = region.getchannel("A").point(lambda v: int(v * alpha)); region.putalpha(a)
+    d._image.paste(region, (x0, y0), region)
 
 def text_center(d, xy, txt, font, fill, stroke=0, stroke_fill=BG):
     d.text(xy, txt, font=font, fill=fill, anchor="mm", stroke_width=stroke, stroke_fill=stroke_fill)
@@ -150,6 +175,8 @@ def main():
     chime(finish_t["quick"], [784, 988, 1175])        # 快排完成
     chime(finish_t["bubble"], [392, 494])             # 冒泡完成
     chime(T_RACE_END + 0.1, [523, 659, 784, 1047], 0.35, 1.2)  # 结果揭晓
+    fade = int(0.5 * SR); end = int(T_END * SR)
+    audio[end - fade:end] *= np.linspace(1, 0, fade, dtype=np.float32); audio[end:] = 0
     audio = np.clip(audio, -1, 1)
     wav_path = args.out + ".wav"
     with wave.open(wav_path, "wb") as w:
@@ -158,7 +185,8 @@ def main():
 
     ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                            "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", wav_path,
-                           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                           "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-maxrate", "20M", "-bufsize", "40M",
+                           "-g", str(FPS * 2), "-pix_fmt", "yuv420p", "-fps_mode", "cfr",
                            "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", args.out],
                           stdin=subprocess.PIPE)
 
@@ -170,7 +198,8 @@ def main():
         # 头部
         d.text((x0 + 30*s, y0 + 26*s), NAME[k], font=F.get(CJK, 54), fill=acc)
         d.text((x0 + 30*s + F.get(CJK, 54).getlength(NAME[k]) + 20*s, y0 + 40*s), BIGO[k], font=F.get(MONO_B, 34), fill=DIM)
-        idx = int(max(0, t - HOOK) * EPS)
+        fidx = max(0, t - HOOK) * EPS
+        idx = int(fidx); frac = fidx - idx
         ev = traces[k]
         e = ev[min(idx, len(ev) - 1)]
         finished = t >= finish_t[k]
@@ -184,18 +213,26 @@ def main():
         by0, by1 = y0 + 120*s, y1 - code_h - 40*s
         n = len(e["arr"]); gap = 4 * s
         bw = (bx1 - bx0 - gap * (n - 1)) / n
-        for i, v in enumerate(e["arr"]):
+        arr = e["arr"]; xpos = {i: float(i) for i in range(n)}
+        if not finished and e["t"] == "swp" and e["i"] != e["j"]:
+            # 交换动画：两根柱子在本操作时间内平滑滑到对方位置
+            a, b = e["i"], e["j"]; m = ease_io(frac / 0.85)
+            xpos[a], xpos[b] = b + (a - b) * m, a + (b - a) * m
+        fin_mix = ease_io((t - finish_t[k]) / 0.4) if finished else 0.0
+        for i, v in enumerate(arr):
             hh = (by1 - by0) * v / n
             c = BAR
             if i in e["done"]: c = DONE
+            if finished and fin_mix < 1: c = lerp(BAR, DONE, fin_mix)
             if not finished:
                 if e.get("pivot") == i: c = PIVOT
                 if i in (e["i"], e["j"]): c = SWP if e["t"] == "swp" else CMP
             else:
-                # 完成后从左到右扫一遍绿光
-                sweep = (t - finish_t[k]) * 60
-                c = lerp(DONE, (200, 255, 210), 1.0 if abs(i - sweep) < 1.5 else 0.0)
-            d.rounded_rectangle((bx0 + i*(bw+gap), by1 - hh, bx0 + i*(bw+gap) + bw, by1), radius=int(min(bw/3, 6*s)), fill=c)
+                # 完成后从左到右扫一遍绿光（高斯包络，连续变化）
+                sweep = (t - finish_t[k] - 0.3) * 50
+                c = lerp(c, (200, 255, 210), math.exp(-((i - sweep) / 2.0) ** 2))
+            bx = bx0 + xpos[i] * (bw + gap)
+            d.rounded_rectangle((bx, by1 - hh, bx + bw, by1), radius=int(min(bw/3, 6*s)), fill=c)
         # 代码框
         cy0 = y1 - code_h - 20*s
         d.rounded_rectangle((x0 + 20*s, cy0, x1 - 20*s, y1 - 20*s), radius=int(14*s), fill=(13, 17, 23))
@@ -210,8 +247,20 @@ def main():
         d.text((x1 - 40*s, y1 - 40*s), f"ops {ops}", font=F.get(MONO, 26), fill=DIM, anchor="rb")
         if finished:
             p = ease_out_back((t - finish_t[k]) / 0.5)
-            fs = 76 * max(0.01, p)
-            text_center(d, ((x0 + x1) / 2, (by0 + by1) / 2), "完成!", F.get(CJK, fs), DONE, stroke=int(6*s))
+            text_pop(d, ((x0 + x1) / 2, (by0 + by1) / 2), "完成!", F.get(CJK, 76), DONE, scale=p, stroke=int(6*s))
+
+    def crossfade(base, draw_a, draw_b, x, dip=False):
+        """叠化：结果 = (base 上画 A) 与 (base 上画 B) 按 x 混合；A 或 B 可为 None。
+        dip=True 时 A 先淡出、B 再淡入（同一位置的文字不互相重叠）。"""
+        def layer(fn):
+            if fn is None: return base
+            im = base.copy(); fn(ImageDraw.Draw(im)); return im
+        if dip:
+            if x < 0.5: return Image.blend(base, layer(draw_a), ease_io(1 - 2 * x)) if draw_a else base
+            return Image.blend(base, layer(draw_b), ease_io(2 * x - 1)) if draw_b else base
+        if x <= 0: return layer(draw_a)
+        if x >= 1: return layer(draw_b)
+        return Image.blend(layer(draw_a), layer(draw_b), x)
 
     for fi in range(nframes):
         t = fi / FPS
@@ -221,43 +270,54 @@ def main():
         g = int(60 * s)
         for x in range(0, W, g): d.line((x, 0, x, H), fill=(18, 23, 30))
         for y in range(0, H, g): d.line((0, y, W, y), fill=(18, 23, 30))
-        # 标题
+        # 标题：钩子文字与正式标题 0.8 秒叠化
         tx, ty = W / 2, title_box[3] / 2
-        if t < HOOK:
+        def hook_title(d):
             p = ease_out_back(t / 0.45)
-            text_center(d, (tx, ty - 50*s), f"同样 {args.n} 个数", F.get(CJK, 64 * max(p, .01)), TXT)
+            text_pop(d, (tx, ty - 50*s), f"同样 {args.n} 个数", F.get(CJK, 64), TXT, scale=p * (1 + 0.02 * t))
             p2 = ease_out_back((t - 0.6) / 0.45)
-            if p2 > 0: text_center(d, (tx, ty + 50*s), "谁先排完？", F.get(CJK, 96 * max(p2, .01)), CMP, stroke=int(4*s))
-        else:
+            if p2 > 0: text_pop(d, (tx, ty + 50*s), "谁先排完？", F.get(CJK, 96), CMP, scale=p2 * (1 + 0.03 * t), stroke=int(4*s))
+        def main_title(d):
             text_center(d, (tx, ty - 30*s), "排序算法大对决", F.get(CJK, 78), TXT)
             text_center(d, (tx, ty + 50*s), "快速排序 VS 冒泡排序", F.get(CJK, 40), DIM)
-        # 面板
+        x = (t - (HOOK - 0.5)) / 1.0
+        img = crossfade(img, hook_title, main_title, min(max(x, 0), 1), dip=True)
+        d = ImageDraw.Draw(img)
+        # 面板：上滑 + 透明度淡入
         for k, box in panels.items():
-            appear = ease_out((t - 1.2 - (0.2 if k == "bubble" else 0)) / 0.6)
+            appear = ease_io((t - 1.0 - (0.25 if k == "bubble" else 0)) / 0.9)
             if appear <= 0: continue
             off = int((1 - appear) * 80 * s)
             b = (box[0], box[1] + off, box[2], box[3] + off)
-            draw_panel(d, k, b, t, appear)
+            img = crossfade(img, None, lambda dd: draw_panel(dd, k, b, t, appear), appear)
+        d = ImageDraw.Draw(img)
         # 进度条（留存）
-        d.rectangle((0, H - 10*s, W * t / T_END, H), fill=CMP)
-        # 结果揭晓
+        px = W * t / T_END; full = int(px)  # 末端像素按小数部分混色，进度条亚像素平滑
+        if full > 0: d.rectangle((0, H - 10*s, full - 1, H), fill=CMP)
+        d.rectangle((full, H - 10*s, full, H), fill=lerp(BG, CMP, px - full))
+        # 结果揭晓：0.6 秒压暗，结论与结尾 0.8 秒叠化
         if t >= T_RACE_END:
-            p = ease_out((t - T_RACE_END) / 0.3)
+            p = ease_io((t - T_RACE_END) / 0.6)
             ov = Image.new("RGBA", (W, H), (0, 0, 0, int(190 * p)))
-            img.paste(Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB"))
-            d = ImageDraw.Draw(img)
-            if t < T_WIN:
+            img = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
+            def result(d):
                 q = ease_out_back((t - T_RACE_END - 0.15) / 0.5)
-                text_center(d, (W/2, H/2 - 120*s), "快速排序", F.get(CJK, 110 * max(q, .01)), ACCENT["quick"], stroke=int(6*s))
+                push = 1 + 0.03 * (t - T_RACE_END)  # 缓慢推近，静止段也保持运动
+                if q > 0: text_pop(d, (W/2, H/2 - 120*s), "快速排序", F.get(CJK, 110), ACCENT["quick"], scale=q * push, stroke=int(6*s))
                 q2 = ease_out_back((t - T_RACE_END - 0.55) / 0.5)
-                if q2 > 0: text_center(d, (W/2, H/2 + 40*s), f"快了 {ratio:.1f} 倍", F.get(CJK, 140 * max(q2, .01)), CMP, stroke=int(8*s))
+                if q2 > 0: text_pop(d, (W/2, H/2 + 40*s), f"快了 {ratio:.1f} 倍", F.get(CJK, 140), CMP, scale=q2 * push, stroke=int(8*s))
                 q3 = ease_out((t - T_RACE_END - 1.1) / 0.4)
-                if q3 > 0: text_center(d, (W/2, H/2 + 190*s), f"{len(traces['quick'])-1} 步  vs  {len(traces['bubble'])-1} 步", F.get(CJK, 50), lerp(BG, TXT, q3))
-            else:
-                q = ease_out_back((t - T_WIN) / 0.5)
-                text_center(d, (W/2, H/2 - 60*s), "你猜对了吗？", F.get(CJK, 100 * max(q, .01)), TXT, stroke=int(6*s))
-                q2 = ease_out((t - T_WIN - 0.5) / 0.4)
-                if q2 > 0: text_center(d, (W/2, H/2 + 90*s), "关注我，下期：归并排序登场", F.get(CJK, 54), lerp(BG, CMP, q2))
+                if q3 > 0: text_pop(d, (W/2, H/2 + 190*s), f"{len(traces['quick'])-1} 步  vs  {len(traces['bubble'])-1} 步", F.get(CJK, 50), TXT, scale=push, alpha=q3)
+            def cta(d):
+                q = ease_out((t - T_WIN) / 0.6)
+                text_pop(d, (W/2, H/2 - 60*s - (1 - q) * 40*s), "你猜对了吗？", F.get(CJK, 100), TXT, scale=1 + 0.03 * (t - T_WIN), stroke=int(6*s))
+                q2 = ease_io((t - T_WIN - 0.3) / 0.6)
+                if q2 > 0: text_pop(d, (W/2, H/2 + 90*s), "关注我，下期：归并排序登场", F.get(CJK, 54), CMP, scale=1 + 0.02 * (t - T_WIN), alpha=q2)
+            x = (t - (T_WIN - 0.5)) / 1.0
+            img = crossfade(img, result, cta, min(max(x, 0), 1), dip=True)
+        # 结尾 0.5 秒淡出到黑
+        fo = ease_io((t - (T_END - 0.5)) / 0.5)
+        if fo > 0: img = Image.blend(img, Image.new("RGB", (W, H), (0, 0, 0)), fo)
         ff.stdin.write(img.tobytes())
     ff.stdin.close(); ff.wait()
     import os; os.remove(wav_path)
