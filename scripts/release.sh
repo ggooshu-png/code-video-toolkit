@@ -19,6 +19,6 @@ if [ "$count" -gt 10 ]; then
   done
 fi
 git add -A
-git commit -q -m "v$next: $msg" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+git commit -q -m "v$next: $msg" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 if git remote | grep -q origin; then git push -q -u origin main; fi
 echo "已发布 v$next"
