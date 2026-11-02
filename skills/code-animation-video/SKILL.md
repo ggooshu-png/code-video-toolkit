@@ -7,9 +7,9 @@ description: Make a viral-style code/algorithm animation video, fully rendered i
 
 ## 技术栈（已验证可用）
 - Python + PIL 逐帧绘制，numpy 合成音效，ffmpeg 通过 stdin 管道编码。无需 Manim/LaTeX，容器里开箱即用。
-- 参考实现：`engine/sort_race.py`（排序对决），已参数化：`--left/--right`（bubble/quick/merge）、`--n`、`--seed`、`--eps`（每秒操作数）、`--hook2`、`--next`。新排序题材直接传参；新题材复制它改：数据轨迹函数 + 布局 + 文案。
+- 参考实现：`engine/sort_race.py`（排序对决），已参数化：`--left/--right`（bubble/quick/merge，可相同）、`--ldata/--rdata`（random/sorted/reversed，同一算法不同数据对比）、`--n`、`--seed`、`--eps`（每秒操作数）、`--hook1/--hook2`、`--next`。新排序题材直接传参；新题材复制它改：数据轨迹函数 + 布局 + 文案。
 - `engine/path_race.py`（寻路对决 A* vs Dijkstra）：`--cols/--rows/--seed/--wall/--eps/--next`。网格每格按自己的访问时间连续淡入（访问瞬间先亮后暗），找到终点后路径按长度连续生长。静态背景网格预渲染一次再逐帧复制。
-- 新增离散写入类操作（如归并的 a[k]=v）时用 `set` 事件，柱高在旧值和新值之间插值，同样遵守连续运动规则。
+- 柱子运动用“时间积分盒式平均”：对最近 max(0.85 个操作, 0.1 秒) 窗口内的状态按时间加权平均。交换类按数值追踪柱子位置，写入类（归并）按下标平滑柱高。这样 eps 再高（每帧多于 1 个操作）也不会单帧跳变；只在单个操作内插值的做法在 eps≥50 时会被 qc 判为硬切。
 - 字体：中文 `/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc`；代码 `DejaVuSansMono.ttf`。中文字符绝不能用等宽字体画（会变方框）。
 - 所有尺寸乘缩放系数 `s = W / 基准宽`，一套代码同时出 1080x1920 和 1920x1080；竖屏上下堆叠，横屏左右并排。
 
@@ -45,6 +45,7 @@ description: Make a viral-style code/algorithm animation video, fully rendered i
 - 结论文字自动适配：差距 ≥15% 写“快了 X 倍”，否则写“险胜 N 步！”。
 - 竞速时长控制在 12 到 16 秒，用 `--eps` 调；太短没悬念，太长掉完播。
 - 寻路类：先扫描 seed，挑探索格数差距约 2 倍且路线绕弯明显的地图；结论强调“路一样长，但少走 X 倍冤枉路”。
+- 反直觉题材最好：同一段代码、只换数据（如排好序的数组让快排慢 2.9 倍），钩子写“同一段代码，哪份数据更快？”。
 - 竖屏面板尽量做高（标题区压到 270px、代码框收紧），网格主体至少占面板一半高度，否则手机上看不清。
 - 叠在主体上的标签（如“到达!”）停留约 1 秒后淡出，别一直遮住结果。
 - 平台普遍看重前 3 秒留存和完播率，钩子必须在第 1 秒内出现问题文字。
@@ -63,7 +64,7 @@ description: Make a viral-style code/algorithm animation video, fully rendered i
 - 发布永远由用户确认，不代发。
 
 ## 选题库
-排序对决（堆、基数、快排遇到已排序数组退化成 O(n²)）、递归可视化、二分查找猜数、蝴蝶效应/混沌、一行代码黑魔法、Bug 找茬、代码打字特效 + 运行结果。
+排序对决（堆、基数、随机枢轴快排）、递归可视化、二分查找猜数、蝴蝶效应/混沌、一行代码黑魔法、Bug 找茬、代码打字特效 + 运行结果。
 
 ## 持续改进
 每做完一条，把新踩的坑和好用的技巧补进本技能（一两行一条），保持精简。

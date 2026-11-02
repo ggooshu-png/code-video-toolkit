@@ -48,8 +48,9 @@ def quick_trace(a):
         for j in range(lo, hi):
             ev.append(dict(t="cmp", i=j, j=hi, line=2, arr=a[:], done=set(done), pivot=hi))
             if a[j] < p:
-                a[i], a[j] = a[j], a[i]
-                ev.append(dict(t="swp", i=i, j=j, line=3, arr=a[:], done=set(done), pivot=hi))
+                if i != j:  # 自己和自己交换不算一步，也不画
+                    a[i], a[j] = a[j], a[i]
+                    ev.append(dict(t="swp", i=i, j=j, line=3, arr=a[:], done=set(done), pivot=hi))
                 i += 1
         a[i], a[hi] = a[hi], a[i]
         ev.append(dict(t="swp", i=i, j=hi, line=4, arr=a[:], done=set(done), pivot=i))
@@ -152,6 +153,9 @@ def main():
     ap.add_argument("--left", default="quick", help="竖屏上方/横屏左侧的算法")
     ap.add_argument("--right", default="bubble", help="竖屏下方/横屏右侧的算法")
     ap.add_argument("--eps", type=float, default=52.0, help="每秒执行的操作数，两边相同")
+    ap.add_argument("--ldata", default="random", choices=["random", "sorted", "reversed"], help="左/上赛道的数据")
+    ap.add_argument("--rdata", default="random", choices=["random", "sorted", "reversed"], help="右/下赛道的数据")
+    ap.add_argument("--hook1", default="", help="钩子第一行，默认“同样 N 个数”")
     ap.add_argument("--hook2", default="谁先排完？")
     ap.add_argument("--next", default="关注我，下期：归并排序登场")
     ap.add_argument("--preview", action="store_true", help="半分辨率快速预览")
@@ -164,9 +168,17 @@ def main():
     F = Fonts(s)
 
     random.seed(args.seed)
-    data = random.sample(range(1, args.n + 1), args.n)
-    LA, RA = args.left, args.right
-    traces = {LA: TRACE[LA](data), RA: TRACE[RA](data)}
+    rnd = random.sample(range(1, args.n + 1), args.n)
+    DATA = {"random": rnd, "sorted": sorted(rnd), "reversed": sorted(rnd, reverse=True)}
+    DLABEL = {"random": "乱序数据", "sorted": "已排好序", "reversed": "完全倒序"}
+    LA, RA = "L", "R"  # 赛道 id；两条赛道可以是同一算法、不同数据
+    ALG = {LA: args.left, RA: args.right}
+    DK = {LA: args.ldata, RA: args.rdata}
+    same_alg = args.left == args.right
+    LANE = {k: (DLABEL[DK[k]] if same_alg else NAME[ALG[k]]) for k in (LA, RA)}
+    SUBT = {k: (DLABEL[DK[k]] if args.ldata != args.rdata and not same_alg else BIGO[ALG[k]]) for k in (LA, RA)}
+    ACC = {LA: ACCENT[ALG[LA]], RA: (255, 140, 66) if same_alg else ACCENT[ALG[RA]]}
+    traces = {k: TRACE[ALG[k]](DATA[DK[k]]) for k in (LA, RA)}
     WIN, LOSE = sorted(traces, key=lambda k: len(traces[k]))
 
     HOOK = 2.5
@@ -177,6 +189,22 @@ def main():
     T_END = T_WIN + 2.4
     nframes = int(T_END * FPS)
     finish_t = {k: HOOK + len(v) / EPS for k, v in traces.items()}
+    KWIN = max(0.85, 0.1 * EPS)  # 平滑窗口（单位：操作数），至少 0.1 秒 = 6 帧
+    PERM, SM = {}, {}
+    for k, ev in traces.items():
+        arrs = np.array([x["arr"] for x in ev], dtype=np.float64)
+        PERM[k] = ALG[k] != "merge"
+        SM[k] = np.argsort(arrs, axis=1).astype(np.float64) if PERM[k] else arrs
+    def smooth(M, fidx, K):
+        lo = fidx - K; E = len(M)
+        j0, j1 = max(0, math.floor(lo)), min(math.floor(fidx), E - 1)
+        acc = np.zeros(M.shape[1]); wsum = 0.0
+        if lo < 0: acc += M[0] * (-lo); wsum += -lo
+        for j in range(j0, j1 + 1):
+            w = min(j + 1, fidx) - max(j, lo)
+            if j == E - 1: w = fidx - max(j, lo)  # 最后状态持续
+            if w > 0: acc += M[j] * w; wsum += w
+        return acc / wsum if wsum > 0 else M[min(j1, E - 1)]
     ratio = len(traces[LOSE]) / len(traces[WIN])
     gap = len(traces[LOSE]) - len(traces[WIN])
     verdict = f"快了 {ratio:.1f} 倍" if ratio >= 1.15 else (f"险胜 {gap} 步！" if gap > 0 else "平局！")
@@ -232,11 +260,14 @@ def main():
     def draw_panel(d, k, box, t, alpha):
         x0, y0, x1, y1 = box
         pw, ph = x1 - x0, y1 - y0
-        acc = ACCENT[k]
+        acc = ACC[k]
         d.rounded_rectangle(box, radius=int(24*s), fill=PANEL, outline=lerp(BORDER, acc, 0.5), width=max(1, int(3*s)))
         # 头部
-        d.text((x0 + 30*s, y0 + 26*s), NAME[k], font=F.get(CJK, 54), fill=acc)
-        d.text((x0 + 30*s + F.get(CJK, 54).getlength(NAME[k]) + 20*s, y0 + 40*s), BIGO[k], font=F.get(MONO_B, 34), fill=DIM)
+        head = NAME[ALG[k]] + ("·" + DLABEL[DK[k]] if same_alg else "")
+        d.text((x0 + 30*s, y0 + 26*s), head, font=F.get(CJK, 54), fill=acc)
+        if not same_alg:
+            sub_font = F.get(MONO_B, 34) if SUBT[k].isascii() else F.get(CJK, 32)
+            d.text((x0 + 30*s + F.get(CJK, 54).getlength(head) + 20*s, y0 + 40*s), SUBT[k], font=sub_font, fill=DIM)
         fidx = max(0, t - HOOK) * EPS
         idx = int(fidx); frac = fidx - idx
         ev = traces[k]
@@ -252,15 +283,14 @@ def main():
         by0, by1 = y0 + 120*s, y1 - code_h - 40*s
         n = len(e["arr"]); gap = 4 * s
         bw = (bx1 - bx0 - gap * (n - 1)) / n
-        arr = e["arr"]; xpos = {i: float(i) for i in range(n)}
-        if not finished and e["t"] == "swp" and e["i"] != e["j"]:
-            # 交换动画：两根柱子在本操作时间内平滑滑到对方位置
-            a, b = e["i"], e["j"]; m = ease_io(frac / 0.85)
-            xpos[a], xpos[b] = b + (a - b) * m, a + (b - a) * m
+        arr = e["arr"]
+        # 连续运动：对最近 K 个操作的状态做盒式平均（按时间积分），操作再快也不会单帧跳变
+        sm = smooth(SM[k], fidx, KWIN)
+        if PERM[k]: xpos = {i: sm[v - 1] for i, v in enumerate(arr)}  # 按数值追踪每根柱子的位置
+        else: xpos = {i: float(i) for i in range(n)}
         fin_mix = ease_io((t - finish_t[k]) / 0.4) if finished else 0.0
         for i, v in enumerate(arr):
-            if not finished and e["t"] == "set" and i == e["i"]:
-                v = e["old"] + (v - e["old"]) * ease_io(frac / 0.85)
+            if not PERM[k]: v = sm[i]  # 归并等写入类：柱高平滑过渡
             hh = (by1 - by0) * v / n
             c = BAR
             if i in e["done"]: c = DONE
@@ -279,7 +309,7 @@ def main():
         d.rounded_rectangle((x0 + 20*s, cy0, x1 - 20*s, y1 - 20*s), radius=int(14*s), fill=(13, 17, 23))
         lh = 36 * s
         mono = F.get(MONO, 27)
-        for li, line in enumerate(CODE[k]):
+        for li, line in enumerate(CODE[ALG[k]]):
             ly = cy0 + 14*s + li * lh
             if not finished and li == e["line"]:
                 d.rectangle((x0 + 22*s, ly - 2*s, x1 - 22*s, ly + lh - 4*s), fill=(56, 48, 20) if e["t"] == "cmp" else (70, 28, 28))
@@ -315,12 +345,12 @@ def main():
         tx, ty = W / 2, title_box[3] / 2
         def hook_title(d):
             p = ease_out_back(t / 0.45)
-            text_pop(d, (tx, ty - 50*s), f"同样 {args.n} 个数", F.get(CJK, 64), TXT, scale=p * (1 + 0.02 * t))
+            text_pop(d, (tx, ty - 50*s), (args.hook1 or f"同样 {args.n} 个数"), F.get(CJK, 64), TXT, scale=p * (1 + 0.02 * t))
             p2 = ease_out_back((t - 0.6) / 0.45)
             if p2 > 0: text_pop(d, (tx, ty + 50*s), args.hook2, F.get(CJK, 96), CMP, scale=p2 * (1 + 0.03 * t), stroke=int(4*s))
         def main_title(d):
             text_center(d, (tx, ty - 30*s), "排序算法大对决", F.get(CJK, 78), TXT)
-            text_center(d, (tx, ty + 50*s), f"{NAME[LA]} VS {NAME[RA]}", F.get(CJK, 40), DIM)
+            text_center(d, (tx, ty + 50*s), f"{LANE[LA]} VS {LANE[RA]}", F.get(CJK, 40), DIM)
         x = (t - (HOOK - 0.5)) / 1.0
         img = crossfade(img, hook_title, main_title, min(max(x, 0), 1), dip=True)
         d = ImageDraw.Draw(img)
@@ -344,7 +374,7 @@ def main():
             def result(d):
                 q = ease_out_back((t - T_RACE_END - 0.15) / 0.5)
                 push = 1 + 0.03 * (t - T_RACE_END)  # 缓慢推近，静止段也保持运动
-                if q > 0: text_pop(d, (W/2, H/2 - 120*s), NAME[WIN], F.get(CJK, 110), ACCENT[WIN], scale=q * push, stroke=int(6*s))
+                if q > 0: text_pop(d, (W/2, H/2 - 120*s), LANE[WIN], F.get(CJK, 110), ACC[WIN], scale=q * push, stroke=int(6*s))
                 q2 = ease_out_back((t - T_RACE_END - 0.55) / 0.5)
                 if q2 > 0: text_pop(d, (W/2, H/2 + 40*s), verdict, F.get(CJK, 140), CMP, scale=q2 * push, stroke=int(8*s))
                 q3 = ease_out((t - T_RACE_END - 1.1) / 0.4)
